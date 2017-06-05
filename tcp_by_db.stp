@@ -1,0 +1,109 @@
+#
+# tcp_by_dbs.stp
+#
+# To get the number of tcp messages received and sent by an oracle database
+# the probes are grouped by instance name 
+# Usage: stap -g ./tcp_by_db.stp <oracle uid> <refresh time ms>
+#
+# Author : Bertrand Drouvot
+# BLOG 	 : https://bdrouvot.wordpress.com
+#
+# Version tcp_by_db.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+
+%{
+#include <linux/string.h> 
+%}
+
+function get_oracle_name_b:string (mystr:string) %{ 
+char *ptr;
+int  ch = '_';
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",ptr + 1); 
+%}
+
+function get_oracle_name_f:string (mystr:string) %{
+char *ptr;
+int    ch = ' ';
+char substr_res[30];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs, ch );
+strncpy (substr_res,strargs+6, ptr - strargs - 6);
+substr_res[ptr - strargs - 6]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res);
+%}
+
+global tcprecv
+global tcpsend
+global tcpmerged
+global orauid
+
+
+probe begin
+{
+orauid = $1
+}
+
+probe tcp.recvmsg
+{
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == orauid) {
+  tcprecv[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == orauid) {
+  tcprecv[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  tcprecv["NOT_A_DB"] <<< size
+}
+}
+
+probe tcp.sendmsg
+{
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == orauid) {
+  tcpsend[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == orauid) {
+  tcpsend[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  tcpsend["NOT_A_DB"] <<< size
+}
+}
+
+function print_activity()
+{
+printf("---------------------------------------------------------\n")
+printf("%-17s %-9s %-9s %-9s %-9s\n","NAME","NB_SENT","SENT_KB","NB_RECV","RECV_KB")
+printf("---------------------------------------------------------\n")
+
+  foreach ([dbname] in tcpsend) {
+	  tcpmerged[dbname] += @count(tcpsend[dbname]);
+  }
+
+  foreach ([dbname] in tcprecv) {
+          tcpmerged[dbname] += @count(tcprecv[dbname]);
+  }
+
+
+  foreach ([dbname] in tcpmerged-) {
+    n_sent = @count(tcpsend[dbname])
+    n_recv = @count(tcprecv[dbname])
+    printf("%-17s %-9d %-9d %-9d %-9d\n",
+           dbname,
+           n_sent,
+           n_sent ? @sum(tcpsend[dbname])/1024 : 0,
+           n_recv,
+           n_recv ? @sum(tcprecv[dbname])/1024 : 0
+           )
+  }
+
+  print("\n")
+
+  delete tcprecv
+  delete tcpsend
+  delete tcpmerged
+}
+
+probe timer.ms($2), end, error
+{
+  print_activity()
+}
