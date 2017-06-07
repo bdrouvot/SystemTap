@@ -1,5 +1,5 @@
 #
-# tcp_by_dbs.stp
+# tcp_by_db.stp
 #
 # To get the number of tcp messages received and sent by an oracle database
 # the probes are grouped by instance name 
