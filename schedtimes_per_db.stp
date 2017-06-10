@@ -1,0 +1,227 @@
+#! /usr/bin/env stap
+
+############################################################
+# schedtimes_per_db.stp
+#
+# Track Time Databases Spend in Various States 
+# Gouped by instance name
+# Usage: stap -g ./schedtimes_per_db.stp <oracle uid> <refresh time ms>
+#
+# Fully inspired by: https://sourceware.org/systemtap/examples/process/schedtimes.stp
+# So, full credit to: Jason Baron <jbaron@redhat.com> & Josh Stone <jistone@redhat.com>
+#
+# Author : Bertrand Drouvot
+# BLOG   : https://bdrouvot.wordpress.com
+#
+# Version schedtimes_per_db.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+############################################################
+
+%{
+#include <linux/string.h>
+%}
+
+function get_oracle_name_b:string (mystr:string) %{
+char *ptr;
+int  ch = '_';
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",ptr + 1);
+%}
+
+function get_oracle_name_f:string (mystr:string) %{
+char *ptr;
+int    ch = ' ';
+char substr_res[30];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs, ch );
+strncpy (substr_res,strargs+6, ptr - strargs - 6);
+substr_res[ptr - strargs - 6]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res);
+%}
+
+//constants
+global DEAD=-1, RUNNING=1, QUEUED=2, SLEEPING=3
+
+global run_time, queued_time, sleep_time, iowait_time
+global run_time_db, queued_time_db, sleep_time_db, iowait_time_db
+global pid_state, pid_names
+global pid_db_name
+
+// For new enough kernels, roughly 2.6.32+, the @defined(@task->in_iowait)
+// tests will succeed and reduce these macros to nothing, including these
+// pid-iowait arrays.  For older kernels, the rq fallback will remain.
+global pid_in_iowait
+global pid_iowait_count
+
+@define in_iowait(task) %(
+  @choose_defined(@task->in_iowait,
+    (pid_in_iowait[@task->pid] ? pid_in_iowait[@task->pid]-- : 0))
+%)
+
+@define clear_iowait(rq, task) %(
+    if (!@defined(@task->in_iowait))
+      pid_iowait_count[@task->pid] = @nr_iowait(@rq)
+%)
+
+@define set_iowait(rq, task) %(
+    if (!@defined(@task->in_iowait))
+      pid_in_iowait[@task->pid] = (@nr_iowait(@rq) > pid_iowait_count[@task->pid])
+%)
+
+@define nr_iowait(rq) %(
+    atomic_read(&@cast(@rq, "rq")->nr_iowait)
+%)
+
+
+global previous_timestamp
+
+function timestamp()
+{
+  return cpu_clock_us(0)
+}
+
+function update_times(pid, now)
+{
+  delta = now - previous_timestamp[pid]
+  previous_timestamp[pid] = now
+
+  if ((state = pid_state[pid]) > 0) {
+    if (state == SLEEPING)
+      sleep_time[pid] += delta
+    else if (state == QUEUED)
+      queued_time[pid] += delta
+    else if (state == RUNNING)
+      run_time[pid] += delta
+  }
+
+  return delta
+}
+
+
+function task_targeted(task)
+{
+  pid = task_pid(task)
+  if (pid && (!target() || target_set_pid(pid))) {
+    pid_names[task_tid(task)] = cmdline_str()
+    if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+    pid_db_name[task_tid(task)] = get_oracle_name_b(cmdline_str())
+    } else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+    pid_db_name[task_tid(task)] = get_oracle_name_f(cmdline_str())
+    } else {
+    pid_db_name[task_tid(task)] = "NOT_A_DB"
+   }
+    return 1
+  }
+  return 0
+}
+
+// Update the task name after exec
+probe kernel.trace("sched_process_exec")!,
+      kprocess.exec_complete
+{
+  if (tid() in pid_names)
+    pid_names[tid()] = cmdline_str()
+    if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+    pid_db_name[tid()] = get_oracle_name_b(cmdline_str())
+    } else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+    pid_db_name[tid()] = get_oracle_name_f(cmdline_str())
+    } else {
+    pid_db_name[tid()] = "NOT_A_DB"
+   }
+}
+
+
+probe kernel.trace("sched_switch")
+{
+  // Task $prev is scheduled off this cpu
+  if (task_targeted($prev)) {
+    pid = $prev->pid
+    state = $prev->state
+    update_times(pid, timestamp())
+
+    if (state > 0) {
+      @set_iowait($rq, $prev)
+      pid_state[pid] = SLEEPING
+    } else if (state == 0) {
+      pid_state[pid] = QUEUED
+    } else {
+      pid_state[pid] = DEAD
+    }
+  }
+
+  // Task $next is scheduled onto this cpu
+  if (task_targeted($next)) {
+    pid = $next->pid
+    update_times(pid, timestamp())
+
+    @clear_iowait($rq, $next)
+    pid_state[pid] = RUNNING
+  }
+}
+
+probe kernel.trace("sched_wakeup")
+{
+  // Task $p is awakened
+  if (@choose_defined($success, 1) && task_targeted($p)) {
+    pid = $p->pid
+    delta = update_times(pid, timestamp())
+    if (pid_state[pid] == SLEEPING && @in_iowait($p)) {
+      iowait_time[pid] += delta
+    }
+    pid_state[pid] = QUEUED
+  }
+}
+
+// Give task $p a final accounting
+probe kernel.trace("sched_process_exit")
+{
+  if (task_targeted($p)) {
+    pid = $p->pid
+    update_times(pid, timestamp())
+    pid_state[pid] = DEAD
+  }
+}
+
+function print_activity()
+{
+  t = timestamp()
+  printf("\n------------------------------------------------------------------\n")
+  printf ("%-10s: %10s %10s %10s %10s %10s\n",
+         "DBNAME", "run(us)", "sleep(us)", "iowait(us)",
+         "queued(us)", "total(us)")
+  printf("------------------------------------------------------------------\n")
+  foreach (pid+ in pid_state) {
+    update_times(pid, t)
+    run_time_db[pid_db_name[pid]] += run_time[pid]
+    sleep_time_db[pid_db_name[pid]] += sleep_time[pid]
+    iowait_time_db[pid_db_name[pid]] += iowait_time[pid]
+    queued_time_db[pid_db_name[pid]] += queued_time[pid]
+  }
+  foreach (dbname in run_time_db) {
+    printf("%-10s: %10d %10d %10d %10d %10d\n", dbname,
+           run_time_db[dbname], sleep_time_db[dbname], iowait_time_db[dbname], queued_time_db[dbname],
+           (run_time_db[dbname] + sleep_time_db[dbname] + iowait_time_db[dbname] + queued_time_db[dbname]))
+  }
+
+  print("\n")
+
+  delete run_time
+  delete run_time_db
+  delete queued_time
+  delete queued_time_db
+  delete sleep_time
+  delete sleep_time_db
+  delete iowait_time
+  delete iowait_time_db
+  delete pid_state
+  delete pid_names
+  delete pid_in_iowait
+  delete pid_iowait_count
+  delete previous_timestamp
+}
+
+probe timer.ms($2), end, error
+{
+  print_activity()
+}

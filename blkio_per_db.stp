@@ -1,0 +1,107 @@
+#! /usr/bin/env stap
+
+############################################################
+# blkio_per_db.stp
+#
+# Track Block I/O by database
+# Gouped by instance name
+# Usage: stap -g ./blkio_per_db.stp <oracle uid> <refresh time ms>
+#
+# Author : Bertrand Drouvot
+# BLOG   : https://bdrouvot.wordpress.com
+#
+# Version blkio_per_db.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+############################################################
+
+%{
+#include <linux/string.h>
+%}
+
+function get_oracle_name_b:string (mystr:string) %{
+char *ptr;
+int  ch = '_';
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",ptr + 1);
+%}
+
+function get_oracle_name_f:string (mystr:string) %{
+char *ptr;
+int    ch = ' ';
+char substr_res[30];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs, ch );
+strncpy (substr_res,strargs+6, ptr - strargs - 6);
+substr_res[ptr - strargs - 6]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res);
+%}
+
+global reads, writes, total_io
+
+probe ioblock.request {
+
+if (bio_rw_str(rw) == "W") {
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  writes[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  writes[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  writes["NOT_A_DB"] <<< size
+}
+
+} else {
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  reads[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  reads[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  reads["NOT_A_DB"] <<< size
+}
+}
+}
+
+function print_activity()
+{
+printf("\n------------------------------------------------------------------------\n")
+printf("%-12s: %-9s %-9s %-9s %-9s %-9s %-9s\n","DBNAME","NB_READ","READ_KB","NB_WRITE","WRITE_KB","NB_TOTAL","TOTAL_KB")
+printf("------------------------------------------------------------------------\n")
+
+  foreach ([dbname] in reads) {
+      total_io[dbname] += @count(reads[dbname]);
+  }
+
+  foreach ([dbname] in writes) {
+      total_io[dbname] += @count(writes[dbname]);
+  }
+
+
+  foreach ([dbname] in total_io-) {
+    n_reads = @count(reads[dbname])
+    n_writes = @count(writes[dbname])
+    kb_reads = n_reads ? @sum(reads[dbname])/1024 : 0
+    kb_writes = n_writes ? @sum(writes[dbname])/1024 : 0
+    printf("%-12s: %-9d %-9d %-9d %-9d %-9d %-9d\n",
+           dbname,
+           n_reads,
+           kb_reads,
+           n_writes,
+           kb_writes,
+           n_reads + n_writes,
+           kb_reads + kb_writes
+           )
+  }
+
+  print("\n")
+
+  delete reads
+  delete writes
+  delete total_io
+}
+
+probe timer.ms($2), end, error
+{
+  print_activity()
+}
