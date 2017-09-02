@@ -1,0 +1,137 @@
+#! /usr/bin/env stap
+
+############################################################
+# page_faults_per_db.stp
+#
+# Track page faults by database
+# Grouped by instance name
+# Usage: stap -g ./page_faults_per_db.stp <oracle uid> <refresh time ms>
+#
+# Author : Bertrand Drouvot
+# BLOG   : https://bdrouvot.wordpress.com
+#
+# Version page_faults_per_db.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+############################################################
+
+%{
+#include <linux/string.h>
+%}
+
+function get_oracle_name_b:string (mystr:string) %{
+char *ptr;
+int  ch = '_';
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",ptr + 1);
+%}
+
+function get_oracle_name_f:string (mystr:string) %{
+char *ptr;
+int    ch = ' ';
+char substr_res[30];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs, ch );
+strncpy (substr_res,strargs+6, ptr - strargs - 6);
+substr_res[ptr - strargs - 6]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res);
+%}
+
+global reads, writes, merged_pflt, minor_pflt, major_pflt
+
+probe vm.pagefault {
+
+if (write_access > 0) {
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  writes[get_oracle_name_b(cmdline_str())] <<< 1
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  writes[get_oracle_name_f(cmdline_str())] <<< 1
+} else {
+  writes["NOT_A_DB"] <<< 1
+}
+
+} else {
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  reads[get_oracle_name_b(cmdline_str())] <<< 1
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  reads[get_oracle_name_f(cmdline_str())] <<< 1
+} else {
+  reads["NOT_A_DB"] <<< 1
+}
+}
+}
+
+probe vm.pagefault.return {
+ if (isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+          if (vm_fault_contains(fault_type,VM_FAULT_MAJOR)) {
+             major_pflt[get_oracle_name_b(cmdline_str())] <<< 1
+          } else if (vm_fault_contains(fault_type,VM_FAULT_MINOR)) {
+             minor_pflt[get_oracle_name_b(cmdline_str())] <<< 1
+          }
+  } else if (isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+          if (vm_fault_contains(fault_type,VM_FAULT_MAJOR)) {
+             major_pflt[get_oracle_name_f(cmdline_str())] <<< 1
+          } else if (vm_fault_contains(fault_type,VM_FAULT_MINOR)) {
+             minor_pflt[get_oracle_name_f(cmdline_str())] <<< 1
+          }
+  } else {
+          if (vm_fault_contains(fault_type,VM_FAULT_MAJOR)) {
+             major_pflt["NOT_A_DB"] <<< 1
+          } else if (vm_fault_contains(fault_type,VM_FAULT_MINOR)) {
+             minor_pflt["NOT_A_DB"] <<< 1
+          }
+  }
+}
+
+function print_activity()
+{
+printf("\n---------------------------------------------------------------------------------------\n")
+printf("%-12s: %-12s %-12s %-12s %-12s %-12s\n","DBNAME","READS_PFLT","WRITES_PFLT","TOTAL_PFLT","MAJOR_PFLT","MINOR_PFLT")
+printf("---------------------------------------------------------------------------------------\n")
+
+  foreach ([dbname] in reads) {
+      merged_pflt[dbname] += @count(reads[dbname]);
+  }
+
+  foreach ([dbname] in writes) {
+      merged_pflt[dbname] += @count(writes[dbname]);
+  }
+
+  foreach ([dbname] in minor_pflt) {
+      merged_pflt[dbname] += @count(minor_pflt[dbname]);
+  }
+
+  foreach ([dbname] in major_pflt) {
+      merged_pflt[dbname] += @count(major_pflt[dbname]);
+  }
+
+  foreach ([dbname] in merged_pflt-) {
+    pf_reads = @count(reads[dbname])
+    pf_writes = @count(writes[dbname])
+    min_pf = @count(minor_pflt[dbname])
+    maj_pf = @count(major_pflt[dbname])
+    printf("%-12s: %-12d %-12d %-12d %-12d %-12d\n",
+           dbname,
+           pf_reads,
+           pf_writes,
+           pf_reads + pf_writes,
+           maj_pf,
+           min_pf
+           )
+  }
+
+  print("\n")
+
+  delete reads
+  delete writes
+  delete merged_pflt
+  delete minor_pflt
+  delete major_pflt
+}
+
+probe timer.ms($2), end, error
+{
+  print_activity()
+}
