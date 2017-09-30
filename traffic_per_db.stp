@@ -1,0 +1,305 @@
+#! /usr/bin/env stap
+
+############################################################
+# traffic_per_db.stp
+#
+# Track traffic per database
+# Gouped by instance name
+# Usage: stap -g ./traffic_per_db.stp <oracle uid> <refresh time ms> <io|network|both>
+#
+# Author : Bertrand Drouvot
+# BLOG   : https://bdrouvot.wordpress.com
+#
+# Version traffic_per_db.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+############################################################
+
+%{
+#include <linux/string.h>
+%}
+
+function get_oracle_name_b:string (mystr:string) %{
+char *ptr;
+int  ch = '_';
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",ptr + 1);
+%}
+
+function get_oracle_name_f:string (mystr:string) %{
+char *ptr;
+int    ch = ' ';
+char substr_res[30];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs, ch );
+strncpy (substr_res,strargs+6, ptr - strargs - 6);
+substr_res[ptr - strargs - 6]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res);
+%}
+
+global vfs_reads, vfs_writes
+global blk_reads, blk_writes
+global tcp_rcv, tcp_send
+global udp_rcv, udp_send
+global nfs_reads, nfs_writes
+global traffic_merged
+
+probe udp.recvmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  udp_rcv[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  #printf("%20s",daddr);
+  udp_rcv[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  udp_rcv["NOT_A_DB"] <<< size
+}
+}
+}
+
+probe udp.sendmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  udp_send[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  udp_send[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  udp_send["NOT_A_DB"] <<< size
+}
+}
+}
+
+probe nfs.fop.write_iter {
+if (@3 == "network" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  nfs_writes[get_oracle_name_b(cmdline_str())] <<< count
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  nfs_writes[get_oracle_name_f(cmdline_str())] <<< count
+} else {
+  nfs_writes["NOT_A_DB"] <<< count
+}
+}
+}
+
+probe nfs.fop.read_iter {
+if (@3 == "network" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  nfs_reads[get_oracle_name_b(cmdline_str())] <<< count
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  nfs_reads[get_oracle_name_f(cmdline_str())] <<< count
+} else {
+  nfs_reads["NOT_A_DB"] <<< count
+}
+}
+}
+
+probe tcp.recvmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  tcp_rcv[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  #printf("%20s",daddr);
+  tcp_rcv[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  tcp_rcv["NOT_A_DB"] <<< size
+}
+}
+}
+
+probe tcp.sendmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  tcp_send[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  tcp_send[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  tcp_send["NOT_A_DB"] <<< size
+}
+}
+}
+
+probe ioblock.request {
+if (@3 == "io" || @3 == "both") {
+if (bio_rw_str(rw) == "W") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  blk_writes[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  blk_writes[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  blk_writes["NOT_A_DB"] <<< size
+}
+
+} else {
+
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  blk_reads[get_oracle_name_b(cmdline_str())] <<< size
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  blk_reads[get_oracle_name_f(cmdline_str())] <<< size
+} else {
+  blk_reads["NOT_A_DB"] <<< size
+}
+}
+}
+}
+
+probe vfs.read.return {
+if (@3 == "io" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  vfs_reads[get_oracle_name_b(cmdline_str())] <<< bytes_read
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  vfs_reads[get_oracle_name_f(cmdline_str())] <<< bytes_read
+} else {
+  vfs_reads["NOT_A_DB"] <<< bytes_read
+}
+}
+}
+
+probe vfs.write.return {
+if (@3 == "io" || @3 == "both") {
+if ( isinstr(cmdline_str() , "ora_" ) == 1 && uid() == $1) {
+  vfs_writes[get_oracle_name_b(cmdline_str())] <<< bytes_written
+} else if ( isinstr(cmdline_str() , "LOCAL=" ) == 1 && uid() == $1) {
+  vfs_writes[get_oracle_name_f(cmdline_str())] <<< bytes_written
+} else {
+  vfs_writes["NOT_A_DB"] <<< bytes_written
+}
+}
+}
+
+function print_activity()
+{
+
+
+ 
+  foreach ([dbname] in vfs_reads) {
+      traffic_merged[dbname] += @count(vfs_reads[dbname]);
+  }
+ 
+  foreach ([dbname] in vfs_writes) {
+          traffic_merged[dbname] += @count(vfs_writes[dbname]);
+  }
+
+  foreach ([dbname] in nfs_reads) {
+      traffic_merged[dbname] += @count(nfs_reads[dbname]);
+  }
+
+  foreach ([dbname] in nfs_writes) {
+          traffic_merged[dbname] += @count(nfs_writes[dbname]);
+  }
+
+  foreach ([dbname] in blk_reads) {
+      traffic_merged[dbname] += @count(blk_reads[dbname]);
+  }
+
+  foreach ([dbname] in blk_writes) {
+          traffic_merged[dbname] += @count(blk_writes[dbname]);
+  }
+ 
+  foreach ([dbname] in tcp_rcv) {
+      traffic_merged[dbname] += @count(tcp_rcv[dbname]);
+  }
+
+  foreach ([dbname] in tcp_send) {
+          traffic_merged[dbname] += @count(tcp_send[dbname]);
+  }
+
+  foreach ([dbname] in udp_rcv) {
+      traffic_merged[dbname] += @count(udp_rcv[dbname]);
+  }
+
+  foreach ([dbname] in udp_send) {
+          traffic_merged[dbname] += @count(udp_send[dbname]);
+  }
+
+ 
+if (@3 == "io" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------")
+printf("\n%1s %10s %44s %4s %44s %1s","|","","","I/O","","|")
+printf("\n%s","-------------------------------------------------------------------------------------------------------------")
+printf("\n%12s %20s %5s %19s %1s %19s %6s %18s %1s","","","READS","","|","","WRITES","","|")
+printf("\n%14s %44s %1s %45s %1s","","","|","","|")
+printf("\n%22s %3s %18s %2s %7s %1s %8s %3s %18s %5s %7s %1s","","VFS","","BLOCK","","|","","VFS","","BLOCK","","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","--","--","|","--","--","|","--","--","|","--","--","|")
+}
+  foreach ([dbname] in traffic_merged-) {
+    n_vfs_reads = @count(vfs_reads[dbname])
+    n_vfs_writes = @count(vfs_writes[dbname])
+    kb_vfs_reads = n_vfs_reads ? @sum(vfs_reads[dbname])/1024 : 0
+    kb_vfs_writes = n_vfs_writes ? @sum(vfs_writes[dbname])/1024 : 0
+
+    n_blk_reads = @count(blk_reads[dbname])
+    n_blk_writes = @count(blk_writes[dbname])
+    kb_blk_reads = n_blk_reads ? @sum(blk_reads[dbname])/1024 : 0
+    kb_blk_writes = n_blk_writes ? @sum(blk_writes[dbname])/1024 : 0
+
+if (@3 == "io" || @3 == "both") {
+    printf("\n%-11s %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s",dbname,"|",n_vfs_reads,kb_vfs_reads,"|",n_blk_reads,kb_blk_reads,"|",n_vfs_writes,kb_vfs_writes,"|",n_blk_writes,kb_blk_writes,"|")
+  }
+}
+if (@3 == "io" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------")
+}
+print("\n")
+print("\n")
+
+if (@3 == "network" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+printf("\n%1s %10s %67s %7s %66s %1s","|","","","Network","","|")
+printf("\n%s","-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+printf("\n%24s %20s %4s %32s %1s %31s %4s %32s %1s","","","RECV","","|","","SENT","","|")
+printf("\n%30s %23s %4s %23s %1s %23s %4s %40s %1s","","","","","|","","","","|")
+printf("\n%22s %3s %9s %9s %3s %9s %9s %3s %8s %1s %8s %3s %9s %9s %3s %9s %9s %3s %8s %1s","","TCP","","","UDP","","","NFS","","|","","TCP","","","UDP","","","NFS","","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","--","--","|","--","--","|","--","--","|","--","--","|","--","--","|","--","--","|")
+}
+
+
+  foreach ([dbname] in traffic_merged-) {
+    n_nfs_reads = @count(nfs_reads[dbname])
+    n_nfs_writes = @count(nfs_writes[dbname])
+    kb_nfs_reads = n_nfs_reads ? @sum(nfs_reads[dbname])/1024 : 0
+    kb_nfs_writes = n_nfs_writes ? @sum(nfs_writes[dbname])/1024 : 0
+
+    n_tcp_rcv = @count(tcp_rcv[dbname])
+    n_tcp_send = @count(tcp_send[dbname])
+    kb_tcp_rcv = n_tcp_rcv ? @sum(tcp_rcv[dbname])/1024 : 0
+    kb_tcp_send = n_tcp_send ? @sum(tcp_send[dbname])/1024 : 0
+
+    n_udp_rcv = @count(udp_rcv[dbname])
+    n_udp_send = @count(udp_send[dbname])
+    kb_udp_rcv = n_udp_rcv ? @sum(udp_rcv[dbname])/1024 : 0
+    kb_udp_send = n_udp_send ? @sum(udp_send[dbname])/1024 : 0
+
+if (@3 == "network" || @3 == "both") {
+    printf("\n%-11s %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s",dbname,"|",n_tcp_rcv,kb_tcp_rcv,"|",n_udp_rcv,kb_udp_rcv,"|",n_nfs_reads,kb_nfs_reads,"|",n_tcp_send,kb_tcp_send,"|",n_udp_send,kb_udp_send,"|",n_nfs_writes,kb_nfs_writes,"|")
+  }
+
+}
+if (@3 == "network" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+}
+  print("\n")
+  print("\n")
+ 
+  delete vfs_reads
+  delete vfs_writes
+  delete nfs_reads
+  delete nfs_writes
+  delete blk_reads
+  delete blk_writes
+  delete tcp_rcv
+  delete tcp_send
+  delete udp_rcv
+  delete udp_send
+  delete traffic_merged
+}
+ 
+probe timer.ms($2), end, error
+{
+  print_activity()
+}
