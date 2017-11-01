@@ -1,0 +1,315 @@
+#! /usr/bin/env stap
+
+############################################################
+# pg_traffic.stp
+#
+# Track pg traffic 
+# Usage: stap -g ./pg_traffic.stp <pg uid> <refresh time ms> <io|network|both> <db|user> <details|nodetails>
+# <db|user>: group by db or user
+# <details|nodetails>: process server details or not
+#
+# Author : Bertrand Drouvot
+# BLOG   : https://bdrouvot.wordpress.com
+#
+# Version pg_traffic.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+############################################################
+
+%{
+#include <linux/string.h>
+%}
+
+function get_pg_dbname:string (mystr:string) %{
+char *ptr;
+char *ptr2;
+
+int  ch = ' ';
+char substr_res[500];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+ptr2 = strchr( ptr + 1 , ch);
+strncpy (substr_res,ptr, ptr2 - ptr);
+substr_res[ptr2 - ptr]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res+1);
+%}
+
+function get_pg_user_proc:string (mystr:string) %{
+char *ptr;
+char *ptr2;
+
+int  ch = ' ';
+char substr_res[500];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs , ch);
+ptr2 = strchr( ptr + 1 , ch);
+strncpy (substr_res,ptr, ptr2 - ptr);
+substr_res[ptr2 - ptr]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res+1);
+%}
+
+global vfs_reads, vfs_writes
+global blk_reads, blk_writes
+global tcp_rcv, tcp_send
+global udp_rcv, udp_send
+global nfs_reads, nfs_writes
+global traffic_merged
+
+probe udp.recvmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { udp_rcv[get_pg_user_proc(cmdline_str())] <<< size } else {  udp_rcv[get_pg_dbname(cmdline_str())] <<< size }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { udp_rcv[get_pg_user_proc(cmdline_str())] <<< size } else { udp_rcv["PG SERVER"] <<< size }
+} else {
+  udp_rcv["NOT_PG"] <<< size
+}
+}
+}
+
+probe udp.sendmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { udp_send[get_pg_user_proc(cmdline_str())] <<< size } else {  udp_send[get_pg_dbname(cmdline_str())] <<< size }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { udp_send[get_pg_user_proc(cmdline_str())] <<< size } else { udp_send["PG SERVER"] <<< size }
+} else {
+  udp_send["NOT_PG"] <<< size
+}
+}
+}
+
+probe nfs.fop.write_iter {
+if (@3 == "network" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { nfs_writes[get_pg_user_proc(cmdline_str())] <<< count } else {  nfs_writes[get_pg_dbname(cmdline_str())] <<< count }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { nfs_writes[get_pg_user_proc(cmdline_str())] <<< count } else { nfs_writes["PG SERVER"] <<< count }
+} else {
+  nfs_writes["NOT_PG"] <<< count
+}
+}
+}
+
+probe nfs.fop.read_iter {
+if (@3 == "network" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { nfs_reads[get_pg_user_proc(cmdline_str())] <<< count } else {  nfs_reads[get_pg_dbname(cmdline_str())] <<< count }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { nfs_reads[get_pg_user_proc(cmdline_str())] <<< count } else { nfs_reads["PG SERVER"] <<< count }
+} else {
+  nfs_reads["NOT_PG"] <<< count
+}
+}
+}
+
+probe tcp.recvmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { tcp_rcv[get_pg_user_proc(cmdline_str())] <<< size } else {  tcp_rcv[get_pg_dbname(cmdline_str())] <<< size }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { tcp_rcv[get_pg_user_proc(cmdline_str())] <<< size } else { tcp_rcv["PG SERVER"] <<< size }
+} else {
+  tcp_rcv["NOT_PG"] <<< size
+}
+}
+}
+
+probe tcp.sendmsg
+{
+if (@3 == "network" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { tcp_send[get_pg_user_proc(cmdline_str())] <<< size } else {  tcp_send[get_pg_dbname(cmdline_str())] <<< size }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { tcp_send[get_pg_user_proc(cmdline_str())] <<< size } else { tcp_send["PG SERVER"] <<< size }
+} else {
+  tcp_send["NOT_PG"] <<< size
+}
+}
+}
+
+probe ioblock.request {
+if (@3 == "io" || @3 == "both") {
+if (bio_rw_str(rw) == "W") {
+
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { blk_writes[get_pg_user_proc(cmdline_str())] <<< size } else {  blk_writes[get_pg_dbname(cmdline_str())] <<< size }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { blk_writes[get_pg_user_proc(cmdline_str())] <<< size } else { blk_writes["PG SERVER"] <<< size }
+} else {
+  blk_writes["NOT_PG"] <<< size
+}
+
+} else {
+
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { blk_reads[get_pg_user_proc(cmdline_str())] <<< size } else {  blk_reads[get_pg_dbname(cmdline_str())] <<< size }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { blk_reads[get_pg_user_proc(cmdline_str())] <<< size } else { blk_reads["PG SERVER"] <<< size }
+} else {
+  blk_reads["NOT_PG"] <<< size
+}
+
+}
+}
+}
+
+probe vfs.read.return {
+if (@3 == "io" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { vfs_reads[get_pg_user_proc(cmdline_str())] <<< bytes_read } else {  vfs_reads[get_pg_dbname(cmdline_str())] <<< bytes_read }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { vfs_reads[get_pg_user_proc(cmdline_str())] <<< bytes_read } else { vfs_reads["PG SERVER"] <<< bytes_read }
+} else {
+  vfs_reads["NOT_PG"] <<< bytes_read
+}
+}
+}
+
+probe vfs.write.return {
+if (@3 == "io" || @3 == "both") {
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@4 == "user") { vfs_writes[get_pg_user_proc(cmdline_str())] <<< bytes_written } else {  vfs_writes[get_pg_dbname(cmdline_str())] <<< bytes_written }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@5 == "details") { vfs_writes[get_pg_user_proc(cmdline_str())] <<< bytes_written } else { vfs_writes["PG SERVER"] <<< bytes_written }
+} else {
+  vfs_writes["NOT_PG"] <<< bytes_written
+}
+}
+}
+
+function print_activity()
+{
+
+
+ 
+  foreach ([groupedby] in vfs_reads) {
+      traffic_merged[groupedby] += @count(vfs_reads[groupedby]);
+  }
+ 
+  foreach ([groupedby] in vfs_writes) {
+          traffic_merged[groupedby] += @count(vfs_writes[groupedby]);
+  }
+
+  foreach ([groupedby] in nfs_reads) {
+      traffic_merged[groupedby] += @count(nfs_reads[groupedby]);
+  }
+
+  foreach ([groupedby] in nfs_writes) {
+          traffic_merged[groupedby] += @count(nfs_writes[groupedby]);
+  }
+
+  foreach ([groupedby] in blk_reads) {
+      traffic_merged[groupedby] += @count(blk_reads[groupedby]);
+  }
+
+  foreach ([groupedby] in blk_writes) {
+          traffic_merged[groupedby] += @count(blk_writes[groupedby]);
+  }
+ 
+  foreach ([groupedby] in tcp_rcv) {
+      traffic_merged[groupedby] += @count(tcp_rcv[groupedby]);
+  }
+
+  foreach ([groupedby] in tcp_send) {
+          traffic_merged[groupedby] += @count(tcp_send[groupedby]);
+  }
+
+  foreach ([groupedby] in udp_rcv) {
+      traffic_merged[groupedby] += @count(udp_rcv[groupedby]);
+  }
+
+  foreach ([groupedby] in udp_send) {
+          traffic_merged[groupedby] += @count(udp_send[groupedby]);
+  }
+
+ 
+if (@3 == "io" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------")
+printf("\n%1s %10s %44s %4s %44s %1s","|","","","I/O","","|")
+printf("\n%s","-------------------------------------------------------------------------------------------------------------")
+printf("\n%12s %20s %5s %19s %1s %19s %6s %18s %1s","","","READS","","|","","WRITES","","|")
+printf("\n%14s %44s %1s %45s %1s","","","|","","|")
+printf("\n%22s %3s %18s %2s %7s %1s %8s %3s %18s %5s %7s %1s","","VFS","","BLOCK","","|","","VFS","","BLOCK","","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","--","--","|","--","--","|","--","--","|","--","--","|")
+}
+  foreach ([groupedby] in traffic_merged-) {
+    n_vfs_reads = @count(vfs_reads[groupedby])
+    n_vfs_writes = @count(vfs_writes[groupedby])
+    kb_vfs_reads = n_vfs_reads ? @sum(vfs_reads[groupedby])/1024 : 0
+    kb_vfs_writes = n_vfs_writes ? @sum(vfs_writes[groupedby])/1024 : 0
+
+    n_blk_reads = @count(blk_reads[groupedby])
+    n_blk_writes = @count(blk_writes[groupedby])
+    kb_blk_reads = n_blk_reads ? @sum(blk_reads[groupedby])/1024 : 0
+    kb_blk_writes = n_blk_writes ? @sum(blk_writes[groupedby])/1024 : 0
+
+if (@3 == "io" || @3 == "both") {
+    printf("\n%-11s %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s",groupedby,"|",n_vfs_reads,kb_vfs_reads,"|",n_blk_reads,kb_blk_reads,"|",n_vfs_writes,kb_vfs_writes,"|",n_blk_writes,kb_blk_writes,"|")
+  }
+}
+if (@3 == "io" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------")
+}
+print("\n")
+print("\n")
+
+if (@3 == "network" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+printf("\n%1s %10s %67s %7s %66s %1s","|","","","Network","","|")
+printf("\n%s","-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+printf("\n%24s %20s %4s %32s %1s %31s %4s %32s %1s","","","RECV","","|","","SENT","","|")
+printf("\n%30s %23s %4s %23s %1s %23s %4s %40s %1s","","","","","|","","","","|")
+printf("\n%22s %3s %9s %9s %3s %9s %9s %3s %8s %1s %8s %3s %9s %9s %3s %9s %9s %3s %8s %1s","","TCP","","","UDP","","","NFS","","|","","TCP","","","UDP","","","NFS","","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|","NB","KB","|")
+printf("\n%11s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s %-18s %2s %1s","","|","--","--","|","--","--","|","--","--","|","--","--","|","--","--","|","--","--","|")
+}
+
+
+  foreach ([groupedby] in traffic_merged-) {
+    n_nfs_reads = @count(nfs_reads[groupedby])
+    n_nfs_writes = @count(nfs_writes[groupedby])
+    kb_nfs_reads = n_nfs_reads ? @sum(nfs_reads[groupedby])/1024 : 0
+    kb_nfs_writes = n_nfs_writes ? @sum(nfs_writes[groupedby])/1024 : 0
+
+    n_tcp_rcv = @count(tcp_rcv[groupedby])
+    n_tcp_send = @count(tcp_send[groupedby])
+    kb_tcp_rcv = n_tcp_rcv ? @sum(tcp_rcv[groupedby])/1024 : 0
+    kb_tcp_send = n_tcp_send ? @sum(tcp_send[groupedby])/1024 : 0
+
+    n_udp_rcv = @count(udp_rcv[groupedby])
+    n_udp_send = @count(udp_send[groupedby])
+    kb_udp_rcv = n_udp_rcv ? @sum(udp_rcv[groupedby])/1024 : 0
+    kb_udp_send = n_udp_send ? @sum(udp_send[groupedby])/1024 : 0
+
+if (@3 == "network" || @3 == "both") {
+    printf("\n%-11s %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s %-10d %10d %1s",groupedby,"|",n_tcp_rcv,kb_tcp_rcv,"|",n_udp_rcv,kb_udp_rcv,"|",n_nfs_reads,kb_nfs_reads,"|",n_tcp_send,kb_tcp_send,"|",n_udp_send,kb_udp_send,"|",n_nfs_writes,kb_nfs_writes,"|")
+  }
+
+}
+if (@3 == "network" || @3 == "both") {
+printf("\n%s","-------------------------------------------------------------------------------------------------------------------------------------------------------------")
+}
+  print("\n")
+  print("\n")
+ 
+  delete vfs_reads
+  delete vfs_writes
+  delete nfs_reads
+  delete nfs_writes
+  delete blk_reads
+  delete blk_writes
+  delete tcp_rcv
+  delete tcp_send
+  delete udp_rcv
+  delete udp_send
+  delete traffic_merged
+}
+ 
+probe timer.ms($2), end, error
+{
+  print_activity()
+}

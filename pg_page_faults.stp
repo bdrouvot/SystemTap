@@ -1,0 +1,148 @@
+#! /usr/bin/env stap
+
+############################################################
+# pg_page_faults.stp
+#
+# Track page faults
+# Usage: stap -g ./pg_page_faults.stp <pg uid> <refresh time ms> <db|user> <details|nodetails>
+# <db|user>: group by db or user
+# <details|nodetails>: process server details or not
+#
+# Author : Bertrand Drouvot
+# BLOG   : https://bdrouvot.wordpress.com
+#
+# Version pg_page_faults.stp 1.0 BETA
+# Note: script is beta, use it at your own risk
+############################################################
+
+%{
+#include <linux/string.h>
+%}
+
+function get_pg_dbname:string (mystr:string) %{
+char *ptr;
+char *ptr2;
+
+int  ch = ' ';
+char substr_res[500];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strchr( strargs , ch) + 1 , ch);
+ptr2 = strchr( ptr + 1 , ch);
+strncpy (substr_res,ptr, ptr2 - ptr);
+substr_res[ptr2 - ptr]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res+1);
+%}
+
+function get_pg_user_proc:string (mystr:string) %{
+char *ptr;
+char *ptr2;
+
+int  ch = ' ';
+char substr_res[500];
+char *strargs = STAP_ARG_mystr;
+ptr = strchr( strargs , ch);
+ptr2 = strchr( ptr + 1 , ch);
+strncpy (substr_res,ptr, ptr2 - ptr);
+substr_res[ptr2 - ptr]='\0';
+snprintf(STAP_RETVALUE, MAXSTRINGLEN, "%s",substr_res+1);
+%}
+
+
+global reads, writes, merged_pflt, minor_pflt, major_pflt
+
+probe vm.pagefault {
+
+if (write_access > 0) {
+
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@3 == "user") { writes[get_pg_user_proc(cmdline_str())] <<< 1 } else {  writes[get_pg_dbname(cmdline_str())] <<< 1 }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@4 == "details") { writes[get_pg_user_proc(cmdline_str())] <<< 1 } else { writes["PG SERVER"] <<< 1 }
+} else {
+  writes["NOT_PG"] <<< 1
+}
+
+} else {
+
+if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+  if (@3 == "user") { reads[get_pg_user_proc(cmdline_str())] <<< 1 } else {  reads[get_pg_dbname(cmdline_str())] <<< 1 }
+} else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+  if (@4 == "details") { reads[get_pg_user_proc(cmdline_str())] <<< 1 } else { reads["PG SERVER"] <<< 1 }
+} else {
+  writes["NOT_PG"] <<< 1
+}
+}
+}
+
+probe vm.pagefault.return {
+ if ( uid() == $1 && (isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "process" ) != 1 && isinstr(cmdline_str() , "bin" ) !=1)) {
+          if (vm_fault_contains(fault_type,VM_FAULT_MAJOR)) {
+             if (@3 == "user") { major_pflt[get_pg_user_proc(cmdline_str())] <<< 1 } else {  major_pflt[get_pg_dbname(cmdline_str())] <<< 1 }
+          } else if (vm_fault_contains(fault_type,VM_FAULT_MINOR)) {
+             if (@3 == "user") { minor_pflt[get_pg_user_proc(cmdline_str())] <<< 1 } else {  minor_pflt[get_pg_dbname(cmdline_str())] <<< 1 }
+          }
+  } else if (uid() == $1 && isinstr(cmdline_str() , "postgres:" ) == 1 && isinstr(cmdline_str() , "bin" ) !=1 ) {
+          if (vm_fault_contains(fault_type,VM_FAULT_MAJOR)) {
+             if (@4 == "details") { major_pflt[get_pg_user_proc(cmdline_str())] <<< 1 } else { major_pflt["PG SERVER"] <<< 1 }
+          } else if (vm_fault_contains(fault_type,VM_FAULT_MINOR)) {
+             if (@4 == "details") { minor_pflt[get_pg_user_proc(cmdline_str())] <<< 1 } else { minor_pflt["PG SERVER"] <<< 1 }
+          }
+  } else {
+          if (vm_fault_contains(fault_type,VM_FAULT_MAJOR)) {
+             major_pflt["NOT_PG"] <<< 1
+          } else if (vm_fault_contains(fault_type,VM_FAULT_MINOR)) {
+             minor_pflt["NOT_PG"] <<< 1
+          }
+  }
+}
+
+function print_activity()
+{
+printf("\n------------------------------------------------------------------------------------------\n")
+printf("%-15s %-12s %-12s %-12s %-12s %-12s\n","","READS_PFLT","WRITES_PFLT","TOTAL_PFLT","MAJOR_PFLT","MINOR_PFLT")
+printf("------------------------------------------------------------------------------------------\n")
+
+  foreach ([groupedby] in reads) {
+      merged_pflt[groupedby] += @count(reads[groupedby]);
+  }
+
+  foreach ([groupedby] in writes) {
+      merged_pflt[groupedby] += @count(writes[groupedby]);
+  }
+
+  foreach ([groupedby] in minor_pflt) {
+      merged_pflt[groupedby] += @count(minor_pflt[groupedby]);
+  }
+
+  foreach ([groupedby] in major_pflt) {
+      merged_pflt[groupedby] += @count(major_pflt[groupedby]);
+  }
+
+  foreach ([groupedby] in merged_pflt-) {
+    pf_reads = @count(reads[groupedby])
+    pf_writes = @count(writes[groupedby])
+    min_pf = @count(minor_pflt[groupedby])
+    maj_pf = @count(major_pflt[groupedby])
+    printf("%-15s: %-12d %-12d %-12d %-12d %-12d\n",
+           groupedby,
+           pf_reads,
+           pf_writes,
+           pf_reads + pf_writes,
+           maj_pf,
+           min_pf
+           )
+  }
+
+  print("\n")
+
+  delete reads
+  delete writes
+  delete merged_pflt
+  delete minor_pflt
+  delete major_pflt
+}
+
+probe timer.ms($2), end, error
+{
+  print_activity()
+}
